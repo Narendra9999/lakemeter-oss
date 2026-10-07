@@ -1,0 +1,203 @@
+# Lakemeter installer bundle — root-level DAB for Bitbucket + Jenkins CI.
+#
+# This is the CI counterpart to scripts/databricks.yml (which the local-operator
+# path, scripts/install.sh, uses). It follows the customer convention:
+#   - `variables:` below are populated from dab-config.json -> usecase_specific_variables,
+#     injected by the Jenkins pipeline (e.g. `--var project_id=... --var app_name=...`
+#     or BUNDLE_VAR_<name> env vars).
+#   - Compute is kept SERVERLESS, so dab-config.json's job_cluster / job_cluster_policy_name
+#     is not consumed here (no job_clusters: block). Leave it as a no-op in dab-config.
+#
+# Jenkins (service-principal auth via env: DATABRICKS_HOST, DATABRICKS_CLIENT_ID,
+# DATABRICKS_CLIENT_SECRET) runs, from the repo root:
+#   databricks bundle validate -t customer
+#   databricks bundle deploy   -t customer
+#   databricks bundle run lakemeter_installer -t customer
+# (CI must first stage pricing_data/ and app_source/ — see the staging step.)
+
+bundle:
+  name: lakemeter-installer
+
+variables:
+  project_id:
+    description: Lakebase Autoscaling project name
+    default: lakemeter-customer
+  db_name:
+    description: Postgres database name
+    default: lakemeter_pricing
+  app_name:
+    description: Databricks App name
+    default: lakemeter
+  secrets_scope:
+    description: Secret scope the installer job creates
+    default: lakemeter-secrets
+  claude_endpoint:
+    description: Foundation-model serving endpoint for the AI assistant
+    default: databricks-claude-opus-4-6
+
+targets:
+  customer:
+    mode: production
+    workspace:
+      # Host resolved from DATABRICKS_HOST (set by Jenkins credentials). To pin it,
+      # uncomment and set host below.
+      # host: https://<customer-workspace-host>
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+
+# Paths are relative to the repo root (this file). The notebooks/pricing/app source
+# all live under scripts/; pricing_data/ and app_source/backend/ are staged by CI.
+sync:
+  include:
+    - "scripts/notebooks/**"
+    - "scripts/pricing_data/**"
+    - "scripts/app_source/**"
+    - "scripts/functions/**"
+    - "scripts/lakebase_autoscaling.py"
+    - "scripts/upgrader/**"
+    - "scripts/upgrade_payload/**"
+  exclude:
+    - "**/__pycache__/**"
+    - "**/*.pyc"
+
+resources:
+  jobs:
+    lakemeter_installer:
+      name: "Lakemeter Installer"
+      parameters:
+        - name: project_id
+          default: "${var.project_id}"
+        - name: db_name
+          default: "${var.db_name}"
+        - name: app_name
+          default: "${var.app_name}"
+        - name: secrets_scope
+          default: "${var.secrets_scope}"
+        - name: claude_endpoint
+          default: "${var.claude_endpoint}"
+      tasks:
+        - task_key: provision_lakebase
+          notebook_task:
+            notebook_path: ./scripts/notebooks/01_provision_lakebase.py
+            base_parameters:
+              project_id: "{{job.parameters.project_id}}"
+          environment_key: serverless_env
+
+        - task_key: create_database
+          depends_on:
+            - task_key: provision_lakebase
+          notebook_task:
+            notebook_path: ./scripts/notebooks/02_create_database.py
+            base_parameters:
+              project_id: "{{job.parameters.project_id}}"
+              db_name: "{{job.parameters.db_name}}"
+              secrets_scope: "{{job.parameters.secrets_scope}}"
+          environment_key: serverless_env
+
+        - task_key: create_functions
+          depends_on:
+            - task_key: create_database
+          notebook_task:
+            notebook_path: ./scripts/notebooks/02b_create_functions.py
+            base_parameters:
+              project_id: "{{job.parameters.project_id}}"
+              db_name: "{{job.parameters.db_name}}"
+          environment_key: serverless_env
+
+        - task_key: load_pricing_data
+          depends_on:
+            - task_key: create_database
+          notebook_task:
+            notebook_path: ./scripts/notebooks/03_load_pricing_data.py
+            base_parameters:
+              project_id: "{{job.parameters.project_id}}"
+              db_name: "{{job.parameters.db_name}}"
+              secrets_scope: "{{job.parameters.secrets_scope}}"
+          environment_key: serverless_env
+
+        - task_key: create_sku_mapping
+          depends_on:
+            - task_key: load_pricing_data
+          notebook_task:
+            notebook_path: ./scripts/notebooks/04_create_sku_mapping.py
+            base_parameters:
+              project_id: "{{job.parameters.project_id}}"
+              db_name: "{{job.parameters.db_name}}"
+          environment_key: serverless_env
+
+        - task_key: create_app
+          notebook_task:
+            notebook_path: ./scripts/notebooks/05a_create_app.py
+            base_parameters:
+              project_id: "{{job.parameters.project_id}}"
+              db_name: "{{job.parameters.db_name}}"
+              app_name: "{{job.parameters.app_name}}"
+              secrets_scope: "{{job.parameters.secrets_scope}}"
+              claude_endpoint: "{{job.parameters.claude_endpoint}}"
+          environment_key: serverless_env
+
+        - task_key: grant_app_access
+          depends_on:
+            - task_key: create_app
+            - task_key: create_database
+          notebook_task:
+            notebook_path: ./scripts/notebooks/05b_grant_app_access.py
+            base_parameters:
+              project_id: "{{job.parameters.project_id}}"
+              db_name: "{{job.parameters.db_name}}"
+              app_name: "{{job.parameters.app_name}}"
+              secrets_scope: "{{job.parameters.secrets_scope}}"
+              claude_endpoint: "{{job.parameters.claude_endpoint}}"
+          environment_key: serverless_env
+
+        - task_key: deploy_app
+          depends_on:
+            - task_key: grant_app_access
+          notebook_task:
+            notebook_path: ./scripts/notebooks/06_deploy_app.py
+            base_parameters:
+              app_name: "{{job.parameters.app_name}}"
+          environment_key: serverless_env
+
+        - task_key: verify_installation
+          depends_on:
+            - task_key: deploy_app
+          notebook_task:
+            notebook_path: ./scripts/notebooks/07_verify_installation.py
+            base_parameters:
+              app_name: "{{job.parameters.app_name}}"
+              project_id: "{{job.parameters.project_id}}"
+              db_name: "{{job.parameters.db_name}}"
+          environment_key: serverless_env
+
+      environments:
+        - environment_key: serverless_env
+          spec:
+            environment_version: "5"
+            dependencies:
+              - "databricks-sdk>=0.123.0"
+              - "psycopg2-binary>=2.9.9"
+
+    lakemeter_upgrade:
+      name: "Lakemeter Upgrade"
+      max_concurrent_runs: 1
+      parameters:
+        - name: command
+          default: "plan"
+        - name: app_name
+          default: "${var.app_name}"
+      tasks:
+        - task_key: upgrade_lakemeter
+          notebook_task:
+            notebook_path: ./scripts/notebooks/08_upgrade_lakemeter.py
+            base_parameters:
+              command: "{{job.parameters.command}}"
+              app_name: "{{job.parameters.app_name}}"
+          environment_key: upgrade_env
+      environments:
+        - environment_key: upgrade_env
+          spec:
+            environment_version: "5"
+            dependencies:
+              - "databricks-sdk>=0.123.0"
+              - "psycopg2-binary>=2.9.9"
+              - "requests>=2.31.0"

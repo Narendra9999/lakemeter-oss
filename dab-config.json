@@ -1,0 +1,13 @@
+{
+  "version": "1.0",
+  "job_cluster": {
+    "job_cluster_policy_name": ""
+  },
+  "usecase_specific_variables": {
+    "project_id": "lakemeter-customer",
+    "db_name": "lakemeter_pricing",
+    "app_name": "lakemeter",
+    "secrets_scope": "lakemeter-secrets",
+    "claude_endpoint": "databricks-claude-opus-4-6"
+  }
+}
