@@ -53,6 +53,7 @@ databricks fs cp backend/static/pricing/ dbfs:/Volumes/$CATALOG/$SCHEMA/raw/ --r
 
 # 3. Create the Genie Space
 python3 genie/create_space.py      # edit CAT/SCH/WID at the top first
+python3 genie/add_synonyms.py    # optional: add column synonyms + entity matching to the Space
 ```
 
 > Retargeting: the SQL files and `create_space.py` hard-code
